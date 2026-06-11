@@ -1,38 +1,27 @@
 """
 Bot Discord - Alternance BTS GTLA
 ==================================
-Commandes disponibles :
-  !chercher   → lance la recherche sur France Travail + HelloWork
+Commandes :
+  !chercher   → recherche sur France Travail + HelloWork
   !aide       → affiche l'aide
 
-Variables d'environnement requises :
-  DISCORD_TOKEN=votre_token_discord
-  FRANCE_TRAVAIL_CLIENT_ID=votre_client_id
-  FRANCE_TRAVAIL_CLIENT_SECRET=votre_client_secret
-  HELLOWORK_EMAIL=votre@email.com
-  HELLOWORK_PASSWORD=votre_mot_de_passe
+Variables Railway :
+  DISCORD_TOKEN
+  FRANCE_TRAVAIL_CLIENT_ID
+  FRANCE_TRAVAIL_CLIENT_SECRET
 
-France Travail : API officielle gratuite (remplace Indeed)
-HelloWork : connexion + mise en favoris automatique
+Sans Selenium — 100% requests + BeautifulSoup
 """
 
 import os
-import time
-import random
 import asyncio
 import logging
 import requests
+from bs4 import BeautifulSoup
 
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import NoSuchElementException, TimeoutException
-from webdriver_manager.chrome import ChromeDriverManager
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -54,10 +43,17 @@ RYTHME_BLACKLIST = [
     "2 jours entreprise", "2j entreprise",
 ]
 
-# ─── Helpers ──────────────────────────────────────────────────────────────────
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "fr-FR,fr;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
 
-def pause(mini=1.5, maxi=3.5):
-    time.sleep(random.uniform(mini, maxi))
+# ─── Helpers ──────────────────────────────────────────────────────────────────
 
 def rythme_acceptable(texte):
     if not texte:
@@ -68,44 +64,17 @@ def rythme_acceptable(texte):
             return False
     return True
 
-def creer_driver():
-    options = webdriver.ChromeOptions()
-    options.add_argument("--headless=new")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1920,1080")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_argument(
-        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    )
-    # Utiliser Chrome/Chromium installé par le système (Railway/Nix)
-    chrome_bin = os.getenv("CHROME_BIN", "")
-    chromedriver_path = os.getenv("CHROMEDRIVER_PATH", "")
-    if chrome_bin:
-        options.binary_location = chrome_bin
-    if chromedriver_path:
-        service = Service(chromedriver_path)
-    else:
-        service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=options)
-    return driver
-
 # ─── France Travail API ───────────────────────────────────────────────────────
 
 def get_token_france_travail():
-    """Récupère un token OAuth2 pour l'API France Travail."""
-    client_id = os.getenv("FRANCE_TRAVAIL_CLIENT_ID", "")
-    client_secret = os.getenv("FRANCE_TRAVAIL_CLIENT_SECRET", "")
+    client_id = os.getenv("FRANCE_TRAVAIL_CLIENT_ID", "").strip()
+    client_secret = os.getenv("FRANCE_TRAVAIL_CLIENT_SECRET", "").strip()
     if not client_id or not client_secret:
         log.warning("France Travail : identifiants manquants.")
         return None
     try:
         resp = requests.post(
-            "https://entreprise.francetravail.fr/connexion/oauth2/access_token"
-            "?realm=%2Fpartenaire",
+            "https://entreprise.francetravail.fr/connexion/oauth2/access_token?realm=%2Fpartenaire",
             data={
                 "grant_type": "client_credentials",
                 "client_id": client_id,
@@ -121,41 +90,33 @@ def get_token_france_travail():
         return None
 
 def scraper_france_travail(keyword):
-    """Recherche des offres via l'API France Travail."""
     annonces = []
     token = get_token_france_travail()
     if not token:
-        log.warning("France Travail : token indisponible, recherche ignorée.")
         return annonces
-
     try:
-        params = {
-            "motsCles": keyword,
-            "typeContrat": "CJ",   # CJ = contrat d'apprentissage / alternance
-            "range": "0-49",
-        }
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/json",
-        }
         resp = requests.get(
             "https://api.francetravail.io/partenaire/offresdemploi/v2/offres/search",
-            params=params,
-            headers=headers,
+            params={
+                "motsCles": keyword,
+                "typeContrat": "CJ",
+                "range": "0-49",
+            },
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/json",
+            },
             timeout=15,
         )
         resp.raise_for_status()
-        data = resp.json()
-        offres = data.get("resultats", [])
-
-        for offre in offres:
+        for offre in resp.json().get("resultats", []):
             titre = offre.get("intitule", "")
             entreprise = offre.get("entreprise", {}).get("nom", "Non précisé")
             lieu = offre.get("lieuTravail", {}).get("libelle", "Non précisé")
-            job_url = offre.get("origineOffre", {}).get("urlOrigine", "")
             description = offre.get("description", "")
+            job_id = offre.get("id", "")
+            job_url = f"https://candidat.francetravail.fr/offres/recherche/detail/{job_id}"
 
-            # Filtrer rythme
             if not rythme_acceptable(titre + " " + description):
                 continue
 
@@ -163,178 +124,89 @@ def scraper_france_travail(keyword):
                 "titre": titre,
                 "entreprise": entreprise,
                 "lieu": lieu,
-                "url": job_url or f"https://candidat.francetravail.fr/offres/recherche/detail/{offre.get('id', '')}",
-                "favori": False,
-                "plateforme": "France Travail"
+                "url": job_url,
+                "plateforme": "France Travail 🏛️"
             })
-
         log.info(f"France Travail | '{keyword}' → {len(annonces)} annonces")
-
     except Exception as e:
         log.error(f"France Travail erreur : {e}")
-
     return annonces
 
-# ─── HelloWork ────────────────────────────────────────────────────────────────
+# ─── HelloWork (sans Selenium) ────────────────────────────────────────────────
 
 def scraper_hellowork(keyword):
     annonces = []
-    driver = creer_driver()
-    wait = WebDriverWait(driver, 15)
+    session = requests.Session()
+    session.headers.update(HEADERS)
 
     try:
-        # Connexion HelloWork
-        email = os.getenv("HELLOWORK_EMAIL", "")
-        password = os.getenv("HELLOWORK_PASSWORD", "")
-        if email and password:
-            try:
-                driver.get("https://www.hellowork.com/fr-fr/compte/connexion.html")
-                pause()
-                # Accepter cookies
-                try:
-                    driver.find_element(
-                        By.XPATH, "//button[contains(text(),'Accepter')]"
-                    ).click()
-                    pause(1, 2)
-                except NoSuchElementException:
-                    pass
-                champ = wait.until(EC.presence_of_element_located((By.ID, "email")))
-                champ.send_keys(email)
-                driver.find_element(By.ID, "password").send_keys(password)
-                driver.find_element(By.CSS_SELECTOR, "button[type='submit']").click()
-                pause(2, 4)
-                log.info("HelloWork : connexion réussie ✅")
-            except Exception as e:
-                log.warning(f"HelloWork connexion échouée : {e}")
-
-        url = (
-            f"https://www.hellowork.com/fr-fr/emploi/recherche.html"
-            f"?k={keyword.replace(' ', '+')}&c=alternance"
-        )
-        driver.get(url)
-        pause()
-
-        # Accepter cookies si pas encore fait
-        try:
-            driver.find_element(
-                By.XPATH, "//button[contains(text(),'Accepter')]"
-            ).click()
-            pause(1, 2)
-        except NoSuchElementException:
-            pass
-
-        for page in range(3):
-            try:
-                cartes = wait.until(
-                    EC.presence_of_all_elements_located(
-                        (By.CSS_SELECTOR, "article.offer-card, li[data-id-offer], [data-cy='offer-card']")
-                    )
-                )
-            except TimeoutException:
-                log.warning(f"HelloWork : aucune annonce page {page+1}")
+        for page in range(1, 4):
+            url = (
+                f"https://www.hellowork.com/fr-fr/emploi/recherche.html"
+                f"?k={keyword.replace(' ', '+')}"
+                f"&c=alternance"
+                f"&p={page}"
+            )
+            resp = session.get(url, timeout=15)
+            if resp.status_code != 200:
+                log.warning(f"HelloWork page {page} : status {resp.status_code}")
                 break
 
-            log.info(f"HelloWork | '{keyword}' | Page {page+1} | {len(cartes)} cartes")
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+            # Chercher les cartes d'annonces
+            cartes = soup.select("article, li[data-id-offer], [data-cy='offer-card']")
+            if not cartes:
+                # Essayer d'autres sélecteurs
+                cartes = soup.select(".job-card, .offer-item, .tw-group")
+
+            if not cartes:
+                log.warning(f"HelloWork : aucune carte trouvée page {page}")
+                break
+
+            log.info(f"HelloWork | '{keyword}' | Page {page} | {len(cartes)} cartes")
 
             for carte in cartes:
                 try:
-                    titre = carte.find_element(
-                        By.CSS_SELECTOR, "h2, h3, [data-cy='offer-title'], .offer-title"
-                    ).text.strip()
-                    entreprise = ""
-                    lieu = ""
-                    try:
-                        entreprise = carte.find_element(
-                            By.CSS_SELECTOR, ".company-name, .offer-company, [data-cy='company-name']"
-                        ).text.strip()
-                    except NoSuchElementException:
-                        pass
-                    try:
-                        lieu = carte.find_element(
-                            By.CSS_SELECTOR, ".offer-location, .location, [data-cy='offer-location']"
-                        ).text.strip()
-                    except NoSuchElementException:
-                        pass
+                    # Titre
+                    titre_el = carte.select_one("h2, h3, [data-cy='offer-title'], .offer-title")
+                    if not titre_el:
+                        continue
+                    titre = titre_el.get_text(strip=True)
+                    if not titre:
+                        continue
+
+                    # Entreprise
+                    entreprise_el = carte.select_one(".company-name, .offer-company, [data-cy='company-name']")
+                    entreprise = entreprise_el.get_text(strip=True) if entreprise_el else "Non précisé"
+
+                    # Lieu
+                    lieu_el = carte.select_one(".offer-location, .location, [data-cy='offer-location']")
+                    lieu = lieu_el.get_text(strip=True) if lieu_el else "Non précisé"
+
+                    # URL
+                    lien_el = carte.select_one("a[href]")
+                    job_url = lien_el["href"] if lien_el else ""
+                    if job_url and not job_url.startswith("http"):
+                        job_url = "https://www.hellowork.com" + job_url
 
                     if not rythme_acceptable(titre):
                         continue
-
-                    lien = carte.find_element(By.CSS_SELECTOR, "a")
-                    job_url = lien.get_attribute("href")
-                    if not job_url.startswith("http"):
-                        job_url = "https://www.hellowork.com" + job_url
-
-                    # Ouvrir l'annonce dans un nouvel onglet
-                    driver.execute_script("window.open(arguments[0]);", job_url)
-                    driver.switch_to.window(driver.window_handles[-1])
-                    pause(1.5, 3)
-
-                    # Vérifier description
-                    try:
-                        description = wait.until(
-                            EC.presence_of_element_located(
-                                (By.CSS_SELECTOR,
-                                 ".offer-description, #job-description, "
-                                 ".job-description, [data-cy='offer-description']")
-                            )
-                        ).text
-                        if not rythme_acceptable(description):
-                            driver.close()
-                            driver.switch_to.window(driver.window_handles[0])
-                            continue
-                    except TimeoutException:
-                        pass
-
-                    # Mettre en favori
-                    favori = False
-                    try:
-                        btn = wait.until(EC.element_to_be_clickable(
-                            (By.CSS_SELECTOR,
-                             "button[aria-label*='favori'], button[aria-label*='Favori'], "
-                             ".bookmark-btn, .save-offer, [data-cy='bookmark-btn']")
-                        ))
-                        driver.execute_script("arguments[0].click();", btn)
-                        favori = True
-                        pause(0.5, 1)
-                        log.info(f"  ⭐ Favori ajouté : {titre}")
-                    except (TimeoutException, NoSuchElementException):
-                        log.debug(f"  ➡️ Pas de bouton favori pour : {titre}")
-
-                    driver.close()
-                    driver.switch_to.window(driver.window_handles[0])
 
                     annonces.append({
                         "titre": titre,
                         "entreprise": entreprise,
                         "lieu": lieu,
                         "url": job_url,
-                        "favori": favori,
-                        "plateforme": "HelloWork"
+                        "plateforme": "HelloWork 🟢"
                     })
 
                 except Exception as e:
                     log.debug(f"Erreur carte HelloWork : {e}")
-                    try:
-                        if len(driver.window_handles) > 1:
-                            driver.close()
-                            driver.switch_to.window(driver.window_handles[0])
-                    except Exception:
-                        pass
                     continue
 
-            # Page suivante
-            try:
-                btn_next = driver.find_element(
-                    By.CSS_SELECTOR, "a[rel='next'], a.pagination-next, [data-cy='pagination-next']"
-                )
-                btn_next.click()
-                pause(2, 4)
-            except NoSuchElementException:
-                log.info("HelloWork : dernière page atteinte.")
-                break
-
-    finally:
-        driver.quit()
+    except Exception as e:
+        log.error(f"HelloWork erreur : {e}")
 
     return annonces
 
@@ -353,33 +225,33 @@ async def on_ready():
 async def aide(ctx):
     embed = discord.Embed(
         title="🎓 Bot Alternance BTS GTLA",
-        description="Je cherche automatiquement des annonces d'alternance sur France Travail et HelloWork !",
+        description="Recherche automatique sur France Travail et HelloWork !",
         color=0x5865F2
     )
-    embed.add_field(name="!chercher", value="Lance la recherche sur France Travail + HelloWork", inline=False)
+    embed.add_field(name="!chercher", value="Lance la recherche d'annonces", inline=False)
     embed.add_field(name="!aide", value="Affiche ce message", inline=False)
     embed.add_field(
         name="Filtres actifs",
-        value="✅ BTS GTLA / Gestion Transports Logistique\n✅ Rythme 2j école / 3j entreprise (ou non précisé)\n✅ Contrat d'alternance uniquement",
+        value="✅ BTS GTLA / Gestion Transports Logistique\n✅ Rythme 2j école / 3j entreprise (ou non précisé)\n✅ Contrat alternance uniquement",
         inline=False
     )
     await ctx.send(embed=embed)
 
 @bot.command(name="chercher")
 async def chercher(ctx):
-    msg = await ctx.send("🔍 Lancement de la recherche sur **France Travail** et **HelloWork**...")
+    msg = await ctx.send("🔍 Recherche en cours sur **France Travail** et **HelloWork**...")
     toutes_annonces = []
     loop = asyncio.get_event_loop()
 
     try:
-        # ── France Travail (API) ──
-        await msg.edit(content="🏛️ Recherche sur **France Travail** (API officielle)...")
+        # France Travail
+        await msg.edit(content="🏛️ Recherche sur **France Travail**...")
         for keyword in KEYWORDS:
             annonces = await loop.run_in_executor(None, scraper_france_travail, keyword)
             toutes_annonces.extend(annonces)
 
-        # ── HelloWork (Selenium) ──
-        await msg.edit(content="🔍 Recherche sur **HelloWork** (connexion + favoris)...")
+        # HelloWork
+        await msg.edit(content="🟢 Recherche sur **HelloWork**...")
         for keyword in KEYWORDS:
             annonces = await loop.run_in_executor(None, scraper_hellowork, keyword)
             toutes_annonces.extend(annonces)
@@ -393,31 +265,22 @@ async def chercher(ctx):
                 vus.add(cle)
                 uniques.append(a)
 
-        favoris = sum(1 for a in uniques if a["favori"])
-        await msg.edit(
-            content=f"✅ Terminé ! **{len(uniques)}** annonces trouvées "
-                    f"(**{favoris}** mis en favoris sur HelloWork)"
-        )
+        await msg.edit(content=f"✅ Terminé ! **{len(uniques)}** annonces trouvées sur France Travail + HelloWork")
 
         if not uniques:
-            await ctx.send("😕 Aucune annonce trouvée pour vos critères.")
+            await ctx.send("😕 Aucune annonce trouvée. Vérifiez vos identifiants France Travail dans Railway.")
             return
 
-        # Envoyer les résultats par blocs de 5
+        # Envoyer par blocs de 5
         for i in range(0, min(len(uniques), 25), 5):
             batch = uniques[i:i+5]
-            couleur = 0x5865F2 if batch[0]["plateforme"] == "France Travail" else 0x00b300
             embed = discord.Embed(
                 title=f"📋 Annonces {i+1} à {i+len(batch)}",
-                color=couleur
+                color=0x5865F2
             )
             for a in batch:
-                if a["plateforme"] == "HelloWork":
-                    statut = "⭐ Favori" if a["favori"] else "🟢 HelloWork"
-                else:
-                    statut = "🏛️ France Travail"
                 embed.add_field(
-                    name=f"{statut} | {a['plateforme']}",
+                    name=f"{a['plateforme']}",
                     value=(
                         f"**{a['titre']}**\n"
                         f"🏢 {a['entreprise']} — 📍 {a['lieu']}\n"
@@ -437,5 +300,5 @@ async def chercher(ctx):
 if __name__ == "__main__":
     token = os.getenv("DISCORD_TOKEN")
     if not token:
-        raise ValueError("DISCORD_TOKEN manquant dans .env !")
+        raise ValueError("DISCORD_TOKEN manquant !")
     bot.run(token)
