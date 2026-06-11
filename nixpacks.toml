@@ -1,0 +1,6 @@
+[phases.setup]
+nixPkgs = ["chromium", "chromedriver", "python313"]
+
+[variables]
+CHROME_BIN = "/run/current-system/sw/bin/chromium"
+CHROMEDRIVER_PATH = "/run/current-system/sw/bin/chromedriver"
