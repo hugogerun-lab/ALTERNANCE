@@ -1,6 +1,6 @@
 [phases.setup]
-nixPkgs = ["chromium", "chromedriver", "python313"]
+nixPkgs = ["google-chrome", "chromium", "chromedriver"]
 
 [variables]
-CHROME_BIN = "/run/current-system/sw/bin/chromium"
-CHROMEDRIVER_PATH = "/run/current-system/sw/bin/chromedriver"
+CHROME_BIN = "/usr/bin/chromium"
+CHROMEDRIVER_PATH = "/usr/bin/chromedriver"
